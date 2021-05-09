@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: augurio-services
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+  BucketName:
+    Type: String
+    Default: enroute-augurio
+
+Globals:
+  Function:
+    Timeout: 500
+    MemorySize: 1000
+    Environment:
+      Variables:
+        S3_BUCKET: !Sub ${BucketName}-${Stage}
+        STAGE_ENV: !Ref Stage
+
+Resources:
+  AugurioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${BucketName}-${Stage}
+      AccessControl: Private
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw-resumes/
+            Function: !GetAtt ExtractCandidateInformation.Arn
+
+  ExtractCandidateInformation:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub extract_candidate_information_${Stage}
+      PackageType: Image
+      ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/augurio/extract_candidate_information:latest
+      Role: !GetAtt LambdaIAMRole.Arn
+
+  ConsumeSourceWorkable:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub consume_source_workable_${Stage}
+      PackageType: Image
+      ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/augurio/consume_source_workable:latest
+      Role: !GetAtt LambdaIAMRole.Arn
+      Events:
+        WorkableScheduler:
+          Type: Schedule
+          Properties:
+            Schedule: 'rate(10 minutes)'
+            Name: WorkableScheduler
+            Enabled: True
+
+  CandidatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub candidates-${Stage}
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      ProvisionedThroughput:
+        ReadCapacityUnits: 10
+        WriteCapacityUnits: 10
+
+  S3InvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref ExtractCandidateInformation
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub arn:aws:s3:::${BucketName}-${Stage}
+
+  LambdaIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: augurioPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: !Sub 'arn:aws:s3:::${BucketName}-${Stage}'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/augurio/*'
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:*'
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/candidates-${Stage}'
